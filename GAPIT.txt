@@ -1,0 +1,292 @@
+setwd("/media/sobp/Data/cattle_SNP/SNP/males_analysis/perm_test/")
+library(GAPIT)
+source("http://zzlab.net/GAPIT/GAPIT.library.R")
+#source("http://zzlab.net/GAPIT/gapit_functions.txt")
+library(vcfR)
+vcf <- read.vcfR("chr1A-286.vcf")
+myHapMap <- vcfR2hapmap(vcf)
+myHapMap <- myHapMap[-1,]
+myGAPIT <- GAPIT(G=myHapMap, output.numerical=TRUE)
+myGD <- myGAPIT$GD
+#myGD
+
+myGM <- myGAPIT$GM
+#myGM # Gives table showing SNP , Chromosome and Position 
+
+pheno <- readxl::read_xlsx("../Phenotypic file.xlsx")
+pheno <- read.table("../plink.pphe")
+pheno <- as.data.frame(pheno)
+pheno$Taxa <- format(pheno$V2, scientific = FALSE)
+pheno$Taxa <- as.numeric(pheno$Taxa)
+#pheno <- pheno[,c(5,3,4)]
+#Step 2: Run GAPIT
+myGD <- myGD[rownames(myGD) %in% pheno$Taxa,]
+pheno <- subset(pheno, Taxa %in% rownames(myGD))
+#myGM_test <- myGM[myGM$Chromosome %in% c(1:30),]
+#myGM_test$SNP <- paste0("X",myGM_test$SNP)
+#myGD_test <- myGD[,colnames(myGD) %in% myGM_test$SNP]
+pheno <- pheno[pheno$Taxa %in% rownames(myGD),]
+pheno <- pheno[match(rownames(myGD), pheno$Taxa),]
+myGD[,1] <- rownames(myGD)
+#sink("GAPIT.out")
+write.csv(pheno, "Phenotype_cattle.csv")
+myGAPIT <- GAPIT(
+  Y=pheno[,c(1003,3:1002)],
+  GD=myGD,
+  GM=myGM,
+  model= c("BLINK"), #c("FarmCPU","BLINK","MLM","MLMM","GLM") choose model
+  #model=c("FarmCPU"),
+  PCA.total=3,                                          # set total PCAs
+  NJtree.group=4,
+  Inter.Plot=F,                                      # perform interactive plot
+  Multiple_analysis=TRUE,                               # perform multiple analysis
+  PCA.3d=TRUE,                                          # plot 3d interactive PCA
+  file.output=T,
+  FDRcut = 5,
+  SNP.FDR = 5
+)
+GAPIT.Validation(Y=pheno[,1:2],
+                 model=c("gBLUP"),
+                 GD=myGD,
+                 GM=myGM,
+                 PCA.total=3,
+                 file.output=T,
+                 nfold=5)
+#sink()
+myY <- pheno[,1:2]
+myKI <- output_file
+rownames(myKI)[91] <- myY$Taxa
+myKI <- myKI[1:91,]
+myCV <- pheno[,c(1,3)]
+t=100 #total replicates
+s=1/5 #sample of inference, e.g. set it to 1/5 for five fold cross validation
+Y.raw=myY#choos a trait
+Y.raw=Y.raw[!is.na(Y.raw[,2]),] #Remove missing data
+n=nrow(Y.raw)
+n.missing=round(n*s)
+storage.ref=matrix(NA,t,1)
+storage.inf=matrix(NA,t,1)
+#Loop on replicates
+for(rep in 1:t){
+  #Set missing data
+  sample.missing=sample(1:n,n.missing)
+  if(n.missing>0){ Y0=Y.raw[-sample.missing,]
+  }else{Y0=Y.raw}
+  #Prediction
+  myGAPIT <- GAPIT(
+    Y=Y0,
+    KI=myKI,
+    CV=myCV,
+    model="gBLUP"
+  )
+  prediction=myGAPIT$Pred
+  #Separate reference (with phenotype) and inference (without phenotype)
+  prediction.ref=prediction[prediction[,3]==1,]
+  prediction.inf=prediction[prediction[,3]==2,]
+  #Merge prediction with original Y
+  YP.ref <- merge(Y.raw, prediction.ref, by.x = "Taxa", by.y = "Taxa")
+  YP.inf <- merge(Y.raw, prediction.inf, by.x = "Taxa", by.y = "Taxa")
+  #Calculate correlation and store them
+  r.ref=cor(as.numeric(as.vector(YP.ref[,2])),as.numeric(as.vector(YP.ref[,6]) ))
+  r.inf=cor(as.numeric(as.vector(YP.inf[,2])),as.numeric(as.vector(YP.inf[,6]) ))
+  storage.ref[rep,1]=r.ref
+  storage.inf[rep,1]=r.inf
+}#End of for (rep in 1:t)
+library(qqman)
+library(biomaRt)
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "bihybrid_gene_ensembl")
+query <- getBM(
+  attributes = c("external_gene_name", "start_position", "end_position","chromosome_name"),
+  mart = ensembl
+)
+gwas.manhattan <- function(gwas){
+  file <- read.csv(gwas)
+  library(tidyverse)
+  gwas_significant_gene <-file %>%
+    mutate(external_gene_name_pos1 = map2_chr(Pos, Chr, function(x, y) {
+      inds = x >= query$start_position & x <= query$end_position & y == query$chromosome_name
+      if (any(inds)) query$external_gene_name[which.max(inds)] else NA
+    }))
+  significant <- subset(gwas_significant_gene , -log10(P.value) > 3.5)
+  write.csv(significant,paste0("Significant_",tools::file_path_sans_ext(gwas),".csv"))
+  file <- file[,c(1:4)]
+  colnames(file) <- c("SNP", "CHR", "BP", "P")
+  file$CHR <- as.numeric(file$CHR)
+  file <- na.omit(file)
+  #png(paste0(tools::file_path_sans_ext(gwas),".png"), width = 22, height = 6, units = "in", res = 300)
+  svg(paste0(tools::file_path_sans_ext(gwas),".svg"), width = 7, height = 6)
+  manhattan(file, main = "Manhattan Plot", ylim = c(0, 10), cex.axis = 0.9, 
+            col = c("blue4", "orange3"), suggestiveline = F, genomewideline = 3.5)
+  invisible(dev.off())
+}
+#gwas.manhattan("GAPIT.Association.GWAS_Results.FarmCPU.Dam Days in Milk.csv")
+files <- list.files(pattern = "^GAPIT.Association.GWAS_Results.*\\.csv")
+for (i in 1:length(files)) {
+  gwas.manhattan(files[i])
+}
+############################## Pathways Analysis ###############################
+list_sig <- list.files(pattern = "^Significant_GAPIT*")
+files_store <- list()
+for (i in 1:length(list_sig)) {
+  significant <- read.csv(list_sig[i], header = T, row.names = 1)
+  files_store[[list_sig[i]]] <- significant$external_gene_name_pos1
+}
+mart <- biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                         dataset = "btaurus_gene_ensembl")
+kegg_analysis <- function(x,y){
+  ttg <- biomaRt::getBM(
+    attributes = c("start_position", "end_position",
+                   "ensembl_gene_id", "entrezgene_id","external_gene_name", "description",
+                   "transcript_biotype","ensembl_peptide_id"),filters = "external_gene_name",
+    values = x,
+    mart = mart)
+  library(DOSE)
+  library(enrichplot)
+  library(clusterProfiler)
+  library(enrichR)
+  library(KEGGREST)
+  # Pull all pathways for AT  
+  pathways.list <- keggList("pathway", "bta")
+  head(pathways.list)
+  # Pull all genes for each pathway
+  pathway.codes <- sub("path:", "", names(pathways.list)) 
+  genes.by.pathway <- sapply(pathway.codes,
+                             function(pwid){
+                               pw <- keggGet(pwid)
+                               if (is.null(pw[[1]]$GENE)) return(NA)
+                               pw2 <- pw[[1]]$GENE[c(TRUE,FALSE)] # may need to modify this to c(FALSE, TRUE) for other organisms
+                               pw2 <- unlist(lapply(strsplit(pw2, split = ";", fixed = T), function(x)x[1]))
+                               return(pw2)
+                             }
+  )
+  head(genes.by.pathway)
+  genes.by.pathway
+  # Wilcoxon test for each pathway
+  #candidate_list=ROH$gene
+  
+  # make named factor showing which genes are of interest
+  geneList= as.numeric(ttg$entrezgene_id)
+  names(geneList)= ttg$entrezgene_id
+  geneList <- na.omit(geneList)
+  pVals.by.pathway <- t(sapply(names(genes.by.pathway),
+                               function(pathway) {
+                                 pathway.genes <- genes.by.pathway[[pathway]]
+                                 list.genes.in.pathway <- intersect(names(geneList), pathway.genes)
+                                 list.genes.not.in.pathway <- setdiff(names(geneList), list.genes.in.pathway)
+                                 scores.in.pathway <- geneList[list.genes.in.pathway]
+                                 scores.not.in.pathway <- geneList[list.genes.not.in.pathway]
+                                 if (length(scores.in.pathway) > 0){
+                                   p.value <- wilcox.test(scores.in.pathway, scores.not.in.pathway, alternative = "less")$p.value
+                                 } else{
+                                   p.value <- NA
+                                 }
+                                 return(c(p.value = p.value, Annotated = length(list.genes.in.pathway)))
+                               }
+  ))
+  
+  # Assemble output table
+  outdat <- data.frame(pathway.code = rownames(pVals.by.pathway))
+  outdat$pathway.name <- pathways.list[outdat$pathway.code]
+  outdat$p.value <- pVals.by.pathway[,"p.value"]
+  outdat$Annotated <- pVals.by.pathway[,"Annotated"]
+  outdat <- outdat[order(outdat$p.value),]
+  head(outdat)
+  library(ggplot2)
+  outdat <- na.omit(outdat)
+  write.csv(outdat, paste("kegg_",y))
+}
+for (i in 1:length(list_sig)) {
+  cat("Anaysis for",files_store[[i]], list_sig[i])
+  kegg_analysis(files_store[[i]], list_sig[i])
+}
+############################## EnrichR ##################################
+GO_analysis <- function(x,y){
+  library(topGO)
+  library(GO.db)
+  library(biomaRt)
+  ttg <- biomaRt::getBM(
+    attributes = c("start_position", "end_position",
+                   "ensembl_gene_id", "entrezgene_id","external_gene_name", "description",
+                   "transcript_biotype","ensembl_peptide_id"),filters = "external_gene_name",
+    values = files_store[[1]],
+    mart = mart)
+  #library(Rgraphviz)
+  go_ids= getBM(attributes=c('go_id', 'entrezgene_id', 'namespace_1003'), 
+                filters='entrezgene_id', values=ttg$entrezgene_id, mart=mart)
+  
+  # build the gene 2 GO annotation list (needed to create topGO object)
+  gene_2_GO=unstack(go_ids[,c(1,2)])
+  
+  # remove any candidate genes without GO annotation
+  #keep = ttg$entrezgene_id %in% go_ids[,2]
+  #keep =which(keep==TRUE)
+  candidate_list=ttg$entrezgene_id
+  
+  # make named factor showing which genes are of interest
+  geneList= as.numeric(candidate_list)
+  names(geneList)= ttg$entrezgene_id
+  
+  GOdata <- new("topGOdata",
+                ontology = "BP", #BP,MF
+                allGenes = geneList,
+                geneSelectionFun = function(x)x,
+                annot = annFUN.gene2GO, gene2GO = gene_2_GO)
+  # define test using the classic algorithm with fisher (refer to [1] if you want to understand how the different algorithms work)
+  classic_fisher_result=runTest(GOdata, algorithm = "weight01", statistic = "ks")
+  png(paste0("GO_BP_",paste0(tools::file_path_sans_ext(list_sig[1]),".png")), width = 8, height = 6, units = "in", res = 300)
+  enrichment_barplot(GOdata, classic_fisher_result, showTerms = 10, numChar = 50, 
+                     title = "Biological Process")
+  invisible(dev.off())
+  tab <- GenTable(GOdata, raw.p.value = classic_fisher_result, topNodes = length(classic_fisher_result@score), numChar = 120)
+  ann.genes <- genesInTerm(GOdata)
+  str(ann.genes)
+  fisher.go <- names(score(classic_fisher_result))
+  fisher.ann.genes <- genesInTerm(GOdata, whichGO=fisher.go)
+  fisher.ann.genes
+  library(plyr)
+  df <- ldply (fisher.ann.genes, data.frame)
+  tab <- merge(tab, df, by.x="GO.ID", by.y=".id")
+  tab <- merge(tab, ttg[,c(4:5)], by.x="X..i..", by.y="entrezgene_id")
+  tab <- tab[!duplicated(tab$Term),]
+  #tab <- subset(tab, raw.p.value < 0.05)
+  write.csv(tab, paste("GO_CC_",y))
+  
+}
+for (i in 1:length(list_sig)) {
+  cat("Anaysis for",files_store[[i]], list_sig[i])
+  GO_analysis(files_store[[i]], list_sig[i])
+}
+ttg <- biomaRt::getBM(
+  attributes = c("start_position", "end_position",
+                 "ensembl_gene_id", "entrezgene_id","external_gene_name", "description",
+                 "transcript_biotype","ensembl_peptide_id"),filters = "external_gene_name",
+  values = files_store[[8]],
+  mart = mart)
+#library(Rgraphviz)
+go_ids= getBM(attributes=c('go_id', 'entrezgene_id', 'namespace_1003'), 
+              filters='entrezgene_id', values=ttg$entrezgene_id, mart=mart)
+
+# build the gene 2 GO annotation list (needed to create topGO object)
+gene_2_GO=unstack(go_ids[,c(1,2)])
+
+# remove any candidate genes without GO annotation
+#keep = ttg$entrezgene_id %in% go_ids[,2]
+#keep =which(keep==TRUE)
+candidate_list=ttg$entrezgene_id
+
+# make named factor showing which genes are of interest
+geneList= as.numeric(candidate_list)
+names(geneList)= ttg$entrezgene_id
+
+GOdata <- new("topGOdata",
+              ontology = "CC", #BP,MF
+              allGenes = geneList,
+              geneSelectionFun = function(x)x,
+              annot = annFUN.gene2GO, gene2GO = gene_2_GO)
+# define test using the classic algorithm with fisher (refer to [1] if you want to understand how the different algorithms work)
+classic_fisher_result=runTest(GOdata, algorithm = "weight01", statistic = "ks")
+png(paste0("GO_CC_",paste0(tools::file_path_sans_ext(list_sig[8]),".png")), width = 8, height = 6, units = "in", res = 300)
+enrichment_barplot(GOdata, classic_fisher_result, showTerms = 10, numChar = 50, 
+                   title = "Cellular Components")
+invisible(dev.off())
+
